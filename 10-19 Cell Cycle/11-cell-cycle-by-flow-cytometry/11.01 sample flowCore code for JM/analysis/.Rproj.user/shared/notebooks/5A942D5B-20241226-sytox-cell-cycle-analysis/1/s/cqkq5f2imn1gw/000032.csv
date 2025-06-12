@@ -1,0 +1,8 @@
+"0","#histPars <- ggcyto_par_set(limits = list(x = c(1e3,1e5)))"
+"0","p1 <- ggcyto(gs, aes(x = `BL1.H`), subset = ""singlet"") +"
+"0","  geom_density_ridges(aes(y = time,fill = time), alpha = 0.5) +"
+"0","  scale_x_logicle() + # use logical transformation on the fluorescence value"
+"0","  histPars + facet_wrap(~rep)"
+"2","[38;5;255mCoordinate system already present. Adding new coordinate system, which will
+replace the existing one.[39m"
+"0","p1"

@@ -1,0 +1,4 @@
+"0","#scPars <- ggcyto_par_set(limits = list(x = c(0,1e6), y = c(30,300)))"
+"0","#polygon <- matrix(c(0.5e5, 0.5e5, 0.75e6, 0.75e6, 60, 75, 120,60), ncol = 2)"
+"0","#colnames(polygon) <- c(""FSC.H"", ""FSC.W"")"
+"0","#singlet.gate <- polygonGate(filterId = ""singlet"", .gate = polygon)"

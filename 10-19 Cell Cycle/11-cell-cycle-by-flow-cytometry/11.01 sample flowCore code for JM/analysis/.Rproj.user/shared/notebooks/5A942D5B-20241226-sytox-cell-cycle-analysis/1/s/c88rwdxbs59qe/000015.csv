@@ -1,0 +1,5 @@
+"0","scPars <- ggcyto_par_set(limits = list(x = c(0,1e6), y = c(30,300)))"
+"0","ggcyto(gs[sample(1:10,2)], aes(x = FSC.H, y = FSC.W), subset = ""-outlier"") + "
+"0","  geom_hex(bins = 128) + scPars"
+"2","[38;5;255mCoordinate system already present. Adding new coordinate system, which will
+replace the existing one.[39m"

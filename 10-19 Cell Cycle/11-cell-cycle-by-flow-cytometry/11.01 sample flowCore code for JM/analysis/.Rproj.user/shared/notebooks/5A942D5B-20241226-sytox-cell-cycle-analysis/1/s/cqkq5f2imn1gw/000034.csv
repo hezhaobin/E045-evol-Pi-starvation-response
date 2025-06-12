@@ -1,0 +1,6 @@
+"0","#p2 <- ggplot(fs[test], aes(x = `YL2.H`)) + geom_density_ridges(aes(y = name, fill = name)) + scale_x_logicle()"
+"0","#theme.elements <- list("
+"0","#  theme_cowplot(),"
+"0","#  theme(legend.position = ""none"", axis.title.y = element_blank(), axis.text.y = element_blank())"
+"0","#)"
+"0","#plot_grid(p1 + theme.elements, p2 + theme.elements + theme(legend.position = c(0.6, 0.85)), ncol = 2)"

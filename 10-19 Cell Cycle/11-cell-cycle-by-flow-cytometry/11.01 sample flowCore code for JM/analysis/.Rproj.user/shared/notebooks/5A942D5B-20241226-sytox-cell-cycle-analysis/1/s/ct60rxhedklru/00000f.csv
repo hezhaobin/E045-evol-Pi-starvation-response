@@ -1,0 +1,9 @@
+"0","gs1 <- GatingSet(fs1) # create a GatingSet"
+"0","gs_pop_add(gs1, outlier.gate, parent = ""root"")"
+"1","[1]"
+"1"," 2"
+"1","
+"
+"0","recompute(gs1)"
+"2","done!
+"

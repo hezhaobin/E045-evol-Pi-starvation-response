@@ -1,0 +1,5 @@
+"0","outlier.gate <- rectangleGate(filterId = ""-outlier"", "
+"0","                              ""FSC.H"" = c(0.5e5, 0.75e6), "
+"0","                              ""SSC.H"" = c(1e2, 0.75e6))"
+"0","ggcyto(fs[sample(1:10, 4)], aes(x = FSC.H, y = SSC.H), subset = ""root"") +"
+"0","  geom_hex(bins = 64) + geom_gate(outlier.gate) + geom_stats()"
