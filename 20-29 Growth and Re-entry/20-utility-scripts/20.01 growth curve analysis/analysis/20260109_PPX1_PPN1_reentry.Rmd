@@ -1,0 +1,658 @@
+---
+title: "20260119 PPX1,PPN1 reentry analysis"
+author: Bin He
+date: 2026-01-19, updated `r Sys.Date()`
+output: 
+  html_notebook:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    theme: readable
+---
+
+```{r}
+require(tidyverse)
+library(gcplyr)
+require(cowplot)
+```
+
+```{r}
+# Set ggplot theme
+old = theme_set(theme_bw(base_size = 14))
+```
+
+
+## Goal
+Determine the lag times of PPX1 and PPN1 KO strains re-entering growth from -Pi starvation media into phosphate-replete media.
+
+## Data
+### Load example data from `gcplyr`
+This helps us to see whether the functions we wrote work properly by checking them against the example dataset and the expected results based on the package author's [vignettes](https://mikeblazanin.github.io/gcplyr/articles/analyze.html#lag)
+```{r}
+# This code was previously explained
+# Here we're re-running it so it's available for us to work with
+example_tidydata <- trans_wide_to_tidy(example_widedata_noiseless,
+                                       id_cols = "Time")
+example_design <- make_design(
+  pattern_split = ",", nrows = 8, ncols = 12,
+  "Bacteria_strain" = make_designpattern(
+    values = paste("Strain", 1:48),
+    rows = 1:8, cols = 1:6, pattern = 1:48, byrow = TRUE),
+  "Bacteria_strain" = make_designpattern(
+    values = paste("Strain", 1:48),
+    rows = 1:8, cols = 7:12, pattern = 1:48, byrow = TRUE),
+  "Phage" = make_designpattern(
+    values = c("No Phage"), rows = 1:8, cols = 1:6, pattern = "1"),
+  "Phage" = make_designpattern(
+    values = c("Phage Added"), rows = 1:8, cols = 7:12, pattern = "1"))
+ex_dat_mrg <- merge_dfs(example_tidydata, example_design)
+ex_dat_mrg$Well <- 
+  factor(ex_dat_mrg$Well,
+         levels = paste(rep(LETTERS[1:8], each = 12), 1:12, sep = ""))
+ex_dat_mrg$Time <- ex_dat_mrg$Time/3600 #Convert time to hours
+ex_dat_mrg <-
+  mutate(group_by(ex_dat_mrg, Well, Bacteria_strain, Phage),
+         deriv = calc_deriv(x = Time, y = Measurements),
+         percap_deriv = calc_deriv(x = Time, y = Measurements, 
+                                        percapita = TRUE, blank = 0,
+                                        window_width_n = 5, trans_y = "log"),
+         doub_time = doubling_time(y = percap_deriv))
+sample_wells <- c("A1", "F1", "F10", "E11")
+# Drop unneeded columns (optional, but makes things cleaner)
+ex_dat_mrg <- dplyr::select(ex_dat_mrg,
+                            Time, Well, Measurements, Bacteria_strain, Phage,
+                            deriv, percap_deriv)
+
+# calculate lag time etc.
+ex_dat_mrg_sum <- 
+  summarize(group_by(ex_dat_mrg, Bacteria_strain, Phage, Well),
+            lag_time = lag_time(y = Measurements, x = Time, 
+                                deriv = percap_deriv, blank = 0),
+            max_percap = max_gc(percap_deriv),
+            max_percap_time = Time[which_max_gc(percap_deriv)],
+            max_percap_dens = Measurements[which_max_gc(percap_deriv)],
+            min_dens = min_gc(Measurements))
+```
+
+### Import growth curve data
+Experiment on 2026-01-09
+```{r}
+# using the read_wides() function from gcplyr to read in the data
+dat_wide <- read_wides(files = "../input/20260109_PPX1_PPN1_reentry.csv") |>
+  # convert time into proper formats
+  mutate(Time = time_length(hms(Time), unit = "hour"))
+
+# Transform our data to be tidy-shaped
+dat_tidy <- 
+  trans_wide_to_tidy(wides = dat_wide, id_cols = c("file", "Time")) %>% 
+  #Set up the Well column so they plot in the correct order
+  mutate(Well = factor(Well,
+                       levels = paste0(rep(LETTERS[1:8], each = 12), 1:12)))
+```
+
+### Exclude empty wells
+```{r}
+tmp <- dat_tidy %>%
+  group_by(Well) %>% 
+  summarize(Max = max(Measurements, na.rm = TRUE))
+empty_wells = tmp$Well[tmp$Max < 0.12]
+sprintf("The following wells are empty: %s", paste(empty_wells, collapse = ", "))
+dat_filtered <- filter(dat_tidy, !(Well %in% empty_wells))
+```
+
+### Import design file
+```{r}
+meta_info <- read_csv("../input/20260109_plate_layout.csv") %>% 
+  mutate(Time_starved = gsub("h", "", Group) %>% fct_inseq(),
+         Group = factor(Group, levels = paste0(levels(Time_starved), "h")))
+```
+
+## Preprocessing
+### Plot growth curves in plate layout
+```{r fig.width=8}
+ggplot(data = dat_tidy, aes(x = Time, y = Measurements)) +
+  geom_line(aes(color = Well %in% empty_wells)) +
+  scale_color_manual("Content", values = c("black", "red"),
+                     labels = c("Cells", "Empty wells")) +
+  facet_wrap(~Well, nrow = 8, ncol = 12) +
+  theme_minimal()
+```
+
+### Subtract the background
+```{r}
+# use column 6 as the blank since it is in between the two sets of samples
+blank_wells <- paste0(LETTERS[1:8], '6')
+blank_value <- dat_tidy |> filter(Well %in% empty_wells) |> 
+  pull(Measurements) |> mean(na.rm = TRUE)
+dat_bg_rm <- dat_filtered %>% 
+  mutate(Measurements = Measurements - blank_value)
+
+# after background subtraction, what is the minimal OD value in each well?
+dat_bg_rm %>% group_by(Well) %>% 
+  summarize(min_OD = min_gc(Measurements, na.rm = TRUE)) %>% 
+  # flatten this to a named vector
+  deframe() %>% 
+  round(3)
+```
+
+2. Calculate derivatives
+```{r}
+dat_deriv <- dat_bg_rm %>% 
+  group_by(Well) %>% 
+  mutate(
+    # plain derivative
+    deriv = calc_deriv(x = Time, y = Measurements, window_width_n = 5),
+    percap_deriv = calc_deriv(x = Time, y = Measurements,
+                              percapita = TRUE,
+                              blank = 0,
+                              window_width_n = 5,
+                              trans_y = "log")
+  )
+
+dat_merged <- left_join(meta_info, dat_deriv, by = "Well")
+```
+
+Plot plain derivative
+```
+ggplot(plain_deriv, aes(x = Time, y = Deriv)) +
+  geom_line() +
+  facet_wrap(~Well, nrow = 8, ncol = 7) +
+  theme_minimal_grid(font_size = 10)
+```
+> We can see that the derivative plots are very noisy in the first 5-6 hours for some of the samples.
+> This could affect the lag time calculation.
+
+Per capita derivative
+```
+ggplot(per_cap_deriv, aes(x = Time, y = percap_deriv)) +
+  geom_line() +
+  facet_wrap(~Well, nrow = 8, ncol = 7, scales = "free_y") +
+  theme_minimal_grid(font_size = 10) +
+  theme(axis.text.y = element_blank())
+```
+
+### Lag time and other summary stats calculation
+```{r}
+dat_sum <- dat_deriv %>%
+  group_by(Well) %>%
+  summarize(
+    min_dens = min_gc(Measurements, na.rm = TRUE),
+    max_dens = max_gc(Measurements, na.rm = TRUE),
+    time_to_5pc_max = first_above(x = Time, y = Measurements, 
+                                  threshold = max_dens*0.05, return = "x"),
+    lag_time = lag_time(x = Time, y = Measurements,
+                        deriv = percap_deriv, blank = 0),
+    max_percap = max_gc(percap_deriv),
+    max_percap_time = Time[which_max_gc(percap_deriv)],
+    max_percap_dens = Measurements[which_max_gc(percap_deriv)],
+    min_dens = min_gc(Measurements)
+  ) %>% 
+  full_join(meta_info, by = "Well") %>% 
+  select(Well, Genotype, Group, everything())
+```
+
+### Diagnostic plot
+Build a diagnostic plot function
+```{r}
+my_diag_plot <- function(df, df.sum, well){
+  # df is the data frame containing the data
+  # df.sum contains the per well estimates calculated from the raw data
+  # this function is aimed at one well of data, specified by "well"
+  # check to see if the well number is valid
+  if(!well %in% df$Well){
+    stop(paste(well, "is not a valid well", sep = " "))
+  }
+  
+  # subset the df
+  dat <- filter(df, Well == well)
+  # extract the estimates
+  par <- filter(df.sum, Well == well)
+  
+  # for overlaying the derivatives on the plot,
+  # we will calculate a scaling factor
+  tmp <- dat %>% summarize(
+    min_OD = min_gc(Measurements), max_OD = max_gc(Measurements),
+    min_deriv = min_gc(deriv), max_deriv = max_gc(deriv),
+    rng_OD = max_OD - min_OD,
+    rng_deriv = max_deriv - min_deriv,
+    sf_deriv = rng_OD / rng_deriv,
+    min_logOD = min_gc(log(Measurements)), max_logOD = max_gc(log(Measurements)),
+    min_percap_deriv = min_gc(percap_deriv), max_percap_deriv = max_gc(percap_deriv),
+    rng_logOD = max_logOD - min_logOD,
+    rng_percap_deriv = max_percap_deriv - min_percap_deriv,
+    sf_percap_deriv = rng_logOD / rng_percap_deriv
+  )
+  
+  # make the linear growth curve plot
+  p1 <- dat %>% 
+    mutate(
+      scaled_deriv = (deriv - tmp$min_deriv)*tmp$sf_deriv + tmp$min_OD
+    ) %>% 
+    ggplot(aes(x = Time, y = Measurements)) + geom_point(size = 0.4) + 
+    geom_line() +
+    geom_line(aes(x = Time, y = scaled_deriv), color = "blue", linetype = 2) +
+    ylab("OD")
+    
+  # make the semi-log plot
+  p2 <- dat %>% 
+    mutate(
+      scaled_percap_deriv = (percap_deriv-tmp$min_percap_deriv)*tmp$sf_percap_deriv + 
+        tmp$min_logOD
+    ) %>% 
+    ggplot(aes(x = Time, y = log(Measurements))) + geom_point() + geom_line() +
+    geom_line(aes(x = Time, y = scaled_percap_deriv),
+              color = "blue", linetype = 2) +
+    geom_abline(
+      data = par,
+      color = "red", 
+      aes(slope = max_percap,
+          intercept = log(max_percap_dens) - max_percap * max_percap_time)
+    ) +
+    geom_vline(data = par,
+               aes(xintercept = lag_time), lty = 2) +
+    geom_hline(data = par,
+               aes(yintercept = log(min_dens))) +
+    ylab("log OD")
+  # draw the derivative and per_capita_derivative
+
+  plot_grid(p1, p2, nrow = 2)
+}
+```
+
+```{r}
+problem_wells <- c("C10", "D7", "E9", "F8")
+tmp <- filter(lag_time, Well %in% problem_wells)
+
+ggplot(data = tmp, aes(x = Time, y = log(Measurements))) +
+  geom_point() +
+  facet_wrap(~Well) +
+  geom_abline(tmp,
+              color = "red",
+              aes(slope = max_percap,
+                  intercept = log(max_percap_dens) - max_percap*max_percap_time)) +
+  geom_vline(data = tmp,
+             aes(xintercept = lag_time), lty = 2) +
+  geom_hline(data = tmp,
+             aes(yintercept = log(min_dens)))
+```
+
+#Here I plot lag times of raw data
+```{r}
+PPKOdata_sum <- summarize(
+  group_by(PPKOdata_merged, Well),
+  lag_time = lag_time(x = Time, y = Measurements, deriv = percap_deriv,
+                      blank = 0),
+  max_percap = max(percap_deriv, na.rm = TRUE),
+  max_dens = max(Measurements),
+  auc = auc(y = Measurements, x = as.numeric(Time)))
+```
+```{r}
+PPKOdata_sum$Well <- factor(PPKOdata_sum$Well, 
+                        levels = paste0(rep(LETTERS[1:8], each = 12), 1:12))
+
+#Plot lag time
+ggplot(data = PPKOdata_sum) +
+  geom_text(aes(label = round(lag_time, 2), x = 1, y = 1)) +
+  facet_wrap(~ Well, ncol = 12) +
+  labs(title = "Lag time by well") +
+  theme(axis.title = element_blank(), 
+        axis.text = element_blank(),
+        axis.ticks = element_blank())
+```
+
+
+
+# Here I am trying to use "smooth" to adjust try to remove noise 
+
+```{r}
+PPKOdata_merged <- 
+  PPKOdata_merged %>%
+  group_by(Well) %>%
+  mutate(
+    meas_smooth = smooth_data(
+      x = Time,
+      y = Measurements,
+      sm_method = "moving-average",
+      window_width_n = 5
+    )
+  ) %>%
+  ungroup()
+
+
+```
+
+```{r}
+PPKOdata_merged <-
+  PPKOdata_merged %>%
+  group_by(Well) %>%
+  mutate(
+    percap_deriv_smooth = c(
+      NA,
+      diff(log(meas_smooth)) / diff(Time)
+    )
+  ) %>%
+  ungroup()
+
+
+```
+
+```{r}
+PPKOdata_sum_smooth <- 
+  PPKOdata_merged %>%
+  group_by(Well) %>%
+  summarize(
+    lag_time = lag_time(
+      x = Time,
+      y = meas_smooth,
+      deriv = percap_deriv_smooth,
+      blank = 0
+    ),
+    max_percap = max(percap_deriv_smooth, na.rm = TRUE),
+    max_dens = max(meas_smooth, na.rm = TRUE),
+    auc = auc(y = meas_smooth, x = as.numeric(Time))
+  )
+
+```
+
+```{r}
+ggplot(PPKOdata_sum_smooth) +
+  geom_text(aes(label = round(lag_time, 2), x = 1, y = 1)) +
+  facet_wrap(~ Well, ncol = 12) +
+  labs(title = "Lag time by well (smoothed data)") +
+  theme(
+    axis.title = element_blank(),
+    axis.text = element_blank(),
+    axis.ticks = element_blank()
+  )
+
+```
+
+```{r}
+PPKOdata_merged$Well <- 
+  factor(PPKOdata_merged$Well,
+         levels = paste0(rep(LETTERS[1:8], each = 12), 1:12))
+ggplot(data = PPKOdata_merged,
+       aes(x = Time, y = meas_smooth)) +
+  geom_line() +
+  facet_wrap(~ Well, nrow = 8, ncol = 12) +
+  labs(
+    title = "Smoothed growth curves",
+    y = "Smoothed measurements"
+  )
+
+```
+
+#After I smooth the data I need to figure out what derivative value to use
+```{r}
+PPKOdata_deriv_multi <-
+  PPKOdata_merged %>%
+  group_by(Well) %>%
+  mutate(
+    derivpercap_3 = calc_deriv(
+      x = Time, y = meas_smooth,
+      percapita = TRUE, blank = 0,
+      window_width_n = 3
+    ),
+    derivpercap_5 = calc_deriv(
+      x = Time, y = meas_smooth,
+      percapita = TRUE, blank = 0,
+      window_width_n = 5
+    ),
+    derivpercap_9 = calc_deriv(
+      x = Time, y = meas_smooth,
+      percapita = TRUE, blank = 0,
+      window_width_n = 9
+    )
+  ) %>%
+  ungroup()
+
+```
+# I want to see what the effects of the different derivaitve windows are 
+```{r}
+wells_of_interest <- c("D7", "D8", "H8", "H10")
+
+PPKOdata_deriv_wide <-
+  PPKOdata_deriv_multi %>%
+  filter(Well %in% wells_of_interest) %>%
+  pivot_longer(
+    cols = starts_with("derivpercap_"),
+    names_to = "window_width_n",
+    names_prefix = "derivpercap_",
+    values_to = "derivpercap"
+  )
+ggplot(
+  data = PPKOdata_deriv_wide,
+  aes(x = Time, y = derivpercap)
+) +
+  geom_line(
+    aes(color = window_width_n),
+    linewidth = 1,
+    alpha = 0.75
+  ) +
+  facet_wrap(~ Well, scales = "free_y") +
+  scale_color_grey(
+    start = 0.7,
+    end = 0.1,
+    name = "window width"
+  ) +
+  ylim(NA, 5) +
+  labs(
+    title = "Per-capita derivative at multiple smoothing levels",
+    y = "Per-capita growth rate"
+  ) +
+  theme_bw()
+
+```
+# I want a closer look so I look at only the first 6 hours
+```{r}
+PPKOdata_deriv_6h <-
+  PPKOdata_deriv_wide %>%
+  filter(Time <= 6)
+ggplot(
+  PPKOdata_deriv_6h,
+  aes(x = Time, y = derivpercap, color = window_width_n)
+) +
+  geom_line(linewidth = 1, alpha = 0.75) +
+  facet_wrap(~ Well, scales = "free_y") +
+  scale_color_grey(
+    start = 0.7,
+    end = 0.1,
+    name = "window width"
+  ) +
+  labs(
+    title = "Per-capita growth rate (first 6 hours)",
+    y = "Per-capita derivative",
+    x = "Time (hours)"
+  ) +
+  theme_bw()
+
+```
+
+#now I try to replot growth curves and lag times using window width of 5
+
+```{r}
+PPKOdata_final <-
+  PPKOdata_merged %>%
+  group_by(Well) %>%
+  mutate(
+    percap_deriv = calc_deriv(
+      x = Time,
+      y = meas_smooth,
+      percapita = TRUE,
+      blank = 0,
+      window_width_n = 5
+    )
+  ) %>%
+  ungroup()
+
+ggplot(data = PPKOdata_final, aes(x = Time, y = meas_smooth)) +
+  geom_line() +
+  facet_wrap(~Well, nrow = 8, ncol = 12)
+
+
+```
+
+```{r}
+PPKOdata_sum_smooth <- summarize(
+  group_by(PPKOdata_merged, Well),
+  lag_time = lag_time(x = Time, y = meas_smooth, deriv = percap_deriv,
+                      blank = 0),
+  max_percap = max(percap_deriv, na.rm = TRUE),
+  max_dens = max(meas_smooth),
+  auc = auc(y = meas_smooth, x = as.numeric(Time)))
+
+PPKOdata_sum_smooth$Well <- factor(PPKOdata_sum_smooth$Well, 
+                        levels = paste0(rep(LETTERS[1:8], each = 12), 1:12))
+
+#Plot lag time
+ggplot(data = PPKOdata_sum_smooth) +
+  geom_text(aes(label = round(lag_time, 2), x = 1, y = 1)) +
+  facet_wrap(~ Well, ncol = 12) +
+  labs(title = "smoothed Lag time by well") +
+  theme(axis.title = element_blank(), 
+        axis.text = element_blank(),
+        axis.ticks = element_blank())
+```
+
+
+
+# Now I will try to use the loess function to smooth the data
+
+```{r}
+PPKOdata_loess_merged <-
+  PPKOdata_merged %>%
+  group_by(Well) %>%
+  mutate(
+    meas_loess = smooth_data(
+      x = Time,
+      y = Measurements,
+      sm_method = "loess",
+      span = 0.15,
+      degree = 1
+    )
+  ) %>%
+  ungroup()
+
+PPKOdata_loess_deriv <-
+  PPKOdata_loess_merged %>%
+  group_by(Well) %>%
+  mutate(
+    percap_deriv_loess = calc_deriv(
+      x = Time,
+      y = meas_loess,
+      percapita = TRUE,
+      blank = 0,
+      window_width_n = 5
+    )
+  ) %>%
+  ungroup()
+
+
+```
+
+```{r}
+PPKOdata_sum_loess <-
+  PPKOdata_loess_deriv %>%
+  group_by(Well) %>%
+  summarize(
+    lag_time = lag_time(
+      x = Time,
+      y = meas_loess,
+      deriv = percap_deriv_loess,
+      blank = 0
+    ),
+    max_percap = max(percap_deriv_loess, na.rm = TRUE),
+    max_dens = max(meas_loess, na.rm = TRUE),
+    auc = auc(y = meas_loess, x = as.numeric(Time))
+  )
+```
+
+
+#plot loess lag times
+```{r}
+ggplot(PPKOdata_sum_loess) +
+  geom_text(aes(label = round(lag_time, 2), x = 1, y = 1)) +
+  facet_wrap(~ Well, ncol = 12) +
+  labs(title = "Lag time by well (loess data)") +
+  theme(
+    axis.title = element_blank(),
+    axis.text = element_blank(),
+    axis.ticks = element_blank()
+  )
+
+```
+
+#plot loess growthcurves
+```{r}
+PPKOdata_loess_deriv$Well <- 
+  factor(PPKOdata_loess_deriv$Well,
+         levels = paste0(rep(LETTERS[1:8], each = 12), 1:12))
+
+ggplot(data = PPKOdata_loess_deriv,
+       aes(x = Time, y = meas_loess)) +
+  geom_line() +
+  facet_wrap(~ Well, nrow = 8, ncol = 12) +
+  labs(
+    title = "Loess growth curves",
+    y = "Loess measurements"
+  )
+
+```
+
+# now i will try to compare one graph using derivatives
+```{r}
+PPsample_wells <- c("D7", "D8", "H8", "H10")
+```
+
+```{r}
+wells_of_interest <- c("D7", "D8", "H8", "H10")
+
+PPKOdata_compare <-
+  PPKOdata_loess_deriv %>%
+  filter(Well %in% wells_of_interest) %>%
+  pivot_longer(
+    cols = c(Measurements, meas_loess),
+    names_to = "type",
+    values_to = "value"
+  )
+ggplot(PPKOdata_compare,
+       aes(x = Time, y = value, color = type)) +
+  geom_line(alpha = 0.75, linewidth = 1) +
+  facet_wrap(~ Well, scales = "free_y") +
+  scale_color_manual(
+    values = c(
+      Measurements = "grey60",
+      meas_loess    = "black"
+    ),
+    labels = c(
+      Measurements = "Raw data",
+      meas_loess    = "Loess-smoothed"
+    )
+  ) +
+  labs(
+    title = "Effect of loess smoothing on growth curves",
+    y = "OD / density",
+    color = ""
+  ) +
+  theme_bw()
+
+```
+
+#compare in a smaller time frame
+```{r}
+PPKOdata_compare_6h <-
+  PPKOdata_compare %>%
+  filter(Time <= 6)
+ggplot(PPKOdata_compare_6h,
+       aes(x = Time, y = value, color = type)) +
+  geom_line(alpha = 0.75, linewidth = 1) +
+  facet_wrap(~ Well, scales = "free_y") +
+  labs(
+    title = "Raw vs loess (first 6 hours)",
+    y = "OD / density",
+    color = ""
+  ) +
+  theme_bw()
+
+```
+

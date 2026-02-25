@@ -1,0 +1,57 @@
+Well,Genotype,Group
+B2,Wildtype,6h
+B3,Wildtype,6h
+B4,Wildtype,6h
+B5,Wildtype,6h
+C2,Wildtype,4h
+C3,Wildtype,4h
+C4,Wildtype,4h
+C5,Wildtype,4h
+D2,Wildtype,3h
+D3,Wildtype,3h
+D4,Wildtype,3h
+D5,Wildtype,3h
+E2,Wildtype,2h
+E3,Wildtype,2h
+E4,Wildtype,2h
+E5,Wildtype,2h
+F2,Wildtype,1h
+F3,Wildtype,1h
+F4,Wildtype,1h
+F5,Wildtype,1h
+G2,Wildtype,0.5h
+G3,Wildtype,0.5h
+G4,Wildtype,0.5h
+G5,Wildtype,0.5h
+H2,Wildtype,0h
+H3,Wildtype,0h
+H4,Wildtype,0h
+H5,Wildtype,0h
+B7,"PPX1,PPN1 KO",6h
+B8,"PPX1,PPN1 KO",6h
+B9,"PPX1,PPN1 KO",6h
+B10,"PPX1,PPN1 KO",6h
+C7,"PPX1,PPN1 KO",4h
+C8,"PPX1,PPN1 KO",4h
+C9,"PPX1,PPN1 KO",4h
+C10,"PPX1,PPN1 KO",4h
+D7,"PPX1,PPN1 KO",3h
+D8,"PPX1,PPN1 KO",3h
+D9,"PPX1,PPN1 KO",3h
+D10,"PPX1,PPN1 KO",3h
+E7,"PPX1,PPN1 KO",2h
+E8,"PPX1,PPN1 KO",2h
+E9,"PPX1,PPN1 KO",2h
+E10,"PPX1,PPN1 KO",2h
+F7,"PPX1,PPN1 KO",1h
+F8,"PPX1,PPN1 KO",1h
+F9,"PPX1,PPN1 KO",1h
+F10,"PPX1,PPN1 KO",1h
+G7,"PPX1,PPN1 KO",0.5h
+G8,"PPX1,PPN1 KO",0.5h
+G9,"PPX1,PPN1 KO",0.5h
+G10,"PPX1,PPN1 KO",0.5h
+H7,"PPX1,PPN1 KO",0h
+H8,"PPX1,PPN1 KO",0h
+H9,"PPX1,PPN1 KO",0h
+H10,"PPX1,PPN1 KO",0h
