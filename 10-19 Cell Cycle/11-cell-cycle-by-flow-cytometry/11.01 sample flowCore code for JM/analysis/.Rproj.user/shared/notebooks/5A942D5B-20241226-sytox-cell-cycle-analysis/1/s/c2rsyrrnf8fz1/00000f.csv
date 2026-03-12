@@ -1,5 +1,0 @@
-"0","#singlet.gate <- gate_flowclust_2d(ex, ""FSC.H"", ""FSC.W"", filterId = ""singlet"", K = 2, quantile = 0.8)"
-"0","# switch to a polygongate"
-"0","polygon <- matrix(c(0.5e5, 0.5e5, 0.75e6, 0.75e6, 60, 75, 120,60), ncol = 2)"
-"0","colnames(polygon) <- c(""FSC.H"", ""FSC.W"")"
-"0","singlet.gate <- polygonGate(filterId = ""singlet"", .gate = polygon)"
