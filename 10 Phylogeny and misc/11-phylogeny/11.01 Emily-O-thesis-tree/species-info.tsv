@@ -1,0 +1,17 @@
+species	family	treeName	pathogen	reference
+Saccharomyces cerevisiae	Saccharomycetaceae	Saccharomyces_cerevisiae	human (rare)	NA
+Saccharomyces paradoxus	Saccharomycetaceae	Saccharomyces_paradoxus	no report	NA
+Saccharomyces mikatae	Saccharomycetaceae	Saccharomyces_mikatae	no report	NA
+Kluyveromyces lactis	Saccharomycetaceae	Kluyveromyces_lactis	no report	NA
+Candida glabrata	Saccharomycetaceae	Candida_glabrata	human	NA
+Lachancea kluyveri	Saccharomycetaceae	Lachancea_kluyveri	no report	NA
+Lachancea waltii	Saccharomycetaceae	Lachancea_waltii	no report	NA
+Candida bracarensis	Saccharomycetaceae	Nakaseomyces_bracarensis	human	NA
+Naumovozyma castellii	Saccharomycetaceae	Naumovozyma_castellii	human	NA
+Nakaseomyces delphensis	Saccharomycetaceae	Nakaseomyces_delphensis	no report	NA
+Candida nivariensis	Saccharomycetaceae	Nakaseomyces_nivariensis	human	NA
+Candida albicans	Debaryomycetaceae	Candida_albicans	human	NA
+Debaryomyces hansenii	Debaryomycetaceae	Debaryomyces_hansenii	human (rare)	PMID: 18701668
+Candida auris	Metschnikowiaceae	Candida_auris	human	NA
+Metschnikowia bicuspidata	Debaryomycetaceae	Metschnikowia_bicuspidata	fresh water insect	NA
+Yarrowia lipolytica	Dipodascaceae	Yarrowia_lipolytica	no report	NA

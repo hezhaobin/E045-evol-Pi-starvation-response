@@ -1,0 +1,9 @@
+Saccharomyces_cerevisiae
+Kluyveromyces_lactis
+Candida_glabrata
+Candida_albicans
+Lachancea_waltii
+Saccharomyces_paradoxus
+Saccharomyces_mikatae
+Nakaseomyces_bracarensis
+Naumovozyma_castellii
