@@ -1,0 +1,1 @@
+data collected by Jess Miller on 2024-07-02, 07-31 and 11-24. %G0/G1 determined by SYTOX staining and flow cytometry. Cells from each species grown either in high (7.5 mM) or no (0 mM) Pi. A 6h time course was collected, including 0, 0.5, 1, 2, 3, 4, 5, and 6h time points.

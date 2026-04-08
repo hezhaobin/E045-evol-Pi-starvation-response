@@ -1,0 +1,79 @@
+---
+title: "EDA and plotting 6h SYTOX stained cell cycle data"
+author: Bin He
+date: "2026-04-08 (updated `r Sys.time()`)"
+output:
+  html_notebook:
+    toc: true
+    toc_depth: 4
+    code_folding: hide
+---
+
+Load libraries
+```{r setup, message=FALSE}
+require(tidyverse)
+require(here)
+```
+
+Set themes for ggplot. If you prefer a different default plot setting, change here.
+```{r}
+old <- theme_set(
+  theme_bw(base_size = 14) + 
+    theme(
+      strip.background = element_blank()
+    )
+)
+```
+
+Set working directory
+```{r}
+i_am("analysis/20260408-sytox-cell-cycle-analysis.Rmd")
+```
+
+## Goal
+- Plot the %G0/G1 over a 6h time course for the four species grown with or without phosphate
+
+## Data
+Jess collected the time course data on 2024-07-02, 07-31 and 11-24.
+
+Setting up species plotting orders and color
+```{r}
+species_color <- c(
+  "S. cerevisiae" = "blue",
+  "C. glabrata"   = "red",
+  "K. lactis"     = "#f8c434",
+  "C. albicans"   = "#74ac4c"
+)
+```
+
+Read data
+```{r}
+in_file = here("input", "../input/20251210-6h-time-course-data-tidy.tsv")
+dat <- read_tsv(in_file) |>
+  mutate(
+    Date = ymd(Date), 
+    Species = fct_relevel(Species, names(species_color)),
+    Treatment = fct_relevel(Treatment, "7.5 mM Pi")
+  ) |>
+  rename(Time = Time_hrs)
+```
+
+## Plotting
+
+```{r}
+dat %>%
+  filter(Time <= 5) |>
+  ggplot(aes(x = Time, y = perc_G0_G1, color = Species)) +
+  stat_summary(fun.y = "mean", geom = "line") +
+  geom_point(size = 0.8, alpha = 0.8) +
+  facet_grid(Treatment ~ Species) +
+  #facet_wrap(~ Treatment, ncol = 2) +
+  labs(x = "Time (h)", y = "% G0/G1", color = "Species") +
+  theme(
+    legend.position = "bottom",
+    strip.text.x = element_text(size = 12, face = 3),
+    legend.text = element_text(face = 3),
+    panel.grid.minor = element_blank()
+  )
+ggsave(here("output", "20260408-4sps-sytox-5h-time-course.png"), width = 8, height = 5)
+```
