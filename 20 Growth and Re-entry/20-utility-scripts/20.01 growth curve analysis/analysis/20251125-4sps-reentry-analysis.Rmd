@@ -12,7 +12,8 @@ output:
 
 ```{r}
 require(tidyverse)
-library(gcplyr)
+require(gcplyr)
+require(growthcurver)
 require(cowplot)
 ```
 
@@ -88,22 +89,35 @@ threshold_empty <- 0.12 # this is the threshold we use to identify empty wells,
 blank_wells <- paste0(LETTERS[1:8], '6') 
 
 my_read_plate <- function(dat_file, sample_file, blank_wells){
-  # using the read_wides() function from gcplyr to read in the data
+  # ---
+  # this function reads in a plate of growth curve data and processes it to 
+  # remove background and identify empty wells
+  # input: Cytation 5 output file (dat_file) and plate layout file (sample_file)
+  # output: a list containing the following:
+  #         d_input: the tidy data frame of raw measurements
+  #         d_processed: the tidy data frame of background-subtracted measurements
+  #         blank_wells: the wells used for background subtraction
+  #         blank_value: the mean value of the blank wells
+  #         empty_wells: the wells identified as empty
+  # ---
+  # 1. using the read_wides() function from gcplyr to read in the data
   dat_wide <- read_wides(files = dat_file) |>
     # convert time into proper formats
     mutate(Time = time_length(hms(Time), unit = "hour"))
   dat_tidy <- trans_wide_to_tidy(wides = dat_wide, id_cols = c("file", "Time")) |>
     #Set up the Well column so they plot in the correct order
     mutate(Well = factor(Well, levels = well_levels))
-  # import meta information
+  # 2. import plate design information: must include a Well column, with
+  # additional genotype and other identifying information in other columns.
+  # The Well column must match the Well column in the data file.
   sample_info <- read_csv(sample_file)
-  # identify empty wells
+  # 3. identify empty wells
   empty_wells <- dat_tidy %>%
     group_by(Well) %>% 
     summarize(Max = max(Measurements, na.rm = TRUE)) %>% 
     filter(Max < threshold_empty) %>% 
     pull(Well)
-  # remove background, using user-provided blank_wells. if not provided,
+  # 4. remove background, using user-provided blank_wells. if not provided,
   # use the empty_wells as the blank wells
   if(missing(blank_wells)){
     blank_wells <- empty_wells
@@ -163,7 +177,10 @@ d_input %>%
 detach(dat_p2)
 ```
 
-## Preprocessing
+## Analysis: `gcplyr` functions
+### Preprocessing
+1. Filter data and ensure correct column data types
+
 2. Calculate derivatives
 ```{r}
 dat_deriv <- dat_bg_rm %>% 
