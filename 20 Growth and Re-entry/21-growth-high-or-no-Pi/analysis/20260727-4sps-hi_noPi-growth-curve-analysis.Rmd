@@ -1,0 +1,1512 @@
+---
+title: "20260727 4 species growth in high and no Pi media"
+author: Bin He
+date: 2026-07-26, updated `r Sys.Date()`
+output: 
+  html_notebook:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    theme: readable
+    code_folding: hide
+---
+
+```{r}
+require(tidyverse)
+require(gcplyr)
+require(growthcurver)
+require(cowplot)
+source(
+  "../script/20260727-growth-curve-helper-functions.R",
+  local = TRUE
+)
+```
+
+```{r}
+# Set ggplot theme
+plot_theme <- theme_half_open() +
+  background_grid(major = "xy", minor = "none") +
+  panel_border() +
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_text(
+      size = 15,
+      face = "bold"
+    ),
+    panel.spacing = unit(1, "lines"),
+    legend.key = element_blank()
+  )
+old = theme_set(plot_theme)
+```
+
+## Goal
+
+Plot and analyze growth characteristics of four species in high and no Pi media. The four species are: *Saccharomyces cerevisiae* (Sc), *Candida glabrata* (Cg), *Kluyveromyces lactis* (Kl), and *Candida albicans* (Ca). The growth curves were measured in 96-well plates using a plate reader (Cytation 5), and the data were collected over time. The main objectives are to visualize the growth curves and compare growth rates, doubling times, maximum densities, and area under the curve among species and media conditions.
+
+## Data
+
+Representative growth curve data are combined from several runs. They were selected based on the quality of the growth curves and the consistency of the results. The data are provided in CSV format, with each file corresponding to a specific experimental run. The data include time points (in hours) and optical density (OD) measurements for each well in the 96-well plate.
+
+| Date       | Treatment | Inoculate  |
+|------------|-----------|------------|
+| 2026-01-19 | high Pi   | stationary |
+| 2026-01-20 | no Pi     | stationary |
+| 2026-01-03 | high Pi   | mid log    |
+| 2026-01-22 | no Pi     | mid log    |
+
+### Load example data from `gcplyr`
+
+This helps us to see whether the functions we wrote work properly by checking them against the example dataset and the expected results based on the package author's [vignettes](https://mikeblazanin.github.io/gcplyr/articles/analyze.html#lag)
+
+```{r}
+# This code was previously explained
+# Here we're re-running it so it's available for us to work with
+example_tidydata <- trans_wide_to_tidy(example_widedata_noiseless,
+                                       id_cols = "Time")
+example_design <- make_design(
+  pattern_split = ",", nrows = 8, ncols = 12,
+  "Bacteria_strain" = make_designpattern(
+    values = paste("Strain", 1:48),
+    rows = 1:8, cols = 1:6, pattern = 1:48, byrow = TRUE),
+  "Bacteria_strain" = make_designpattern(
+    values = paste("Strain", 1:48),
+    rows = 1:8, cols = 7:12, pattern = 1:48, byrow = TRUE),
+  "Phage" = make_designpattern(
+    values = c("No Phage"), rows = 1:8, cols = 1:6, pattern = "1"),
+  "Phage" = make_designpattern(
+    values = c("Phage Added"), rows = 1:8, cols = 7:12, pattern = "1"))
+ex_dat_mrg <- merge_dfs(example_tidydata, example_design)
+ex_dat_mrg$Well <- 
+  factor(ex_dat_mrg$Well,
+         levels = paste(rep(LETTERS[1:8], each = 12), 1:12, sep = ""))
+ex_dat_mrg$Time <- ex_dat_mrg$Time/3600 #Convert time to hours
+ex_dat_mrg <-
+  mutate(group_by(ex_dat_mrg, Well, Bacteria_strain, Phage),
+         deriv = calc_deriv(x = Time, y = Measurements),
+         percap_deriv = calc_deriv(x = Time, y = Measurements, 
+                                        percapita = TRUE, blank = 0,
+                                        window_width_n = 5, trans_y = "log"),
+         doub_time = doubling_time(y = percap_deriv))
+sample_wells <- c("A1", "F1", "F10", "E11")
+# Drop unneeded columns (optional, but makes things cleaner)
+ex_dat_mrg <- dplyr::select(ex_dat_mrg,
+                            Time, Well, Measurements, Bacteria_strain, Phage,
+                            deriv, percap_deriv)
+
+# calculate example growth summaries
+ex_dat_mrg_sum <- 
+  summarize(group_by(ex_dat_mrg, Bacteria_strain, Phage, Well),
+            max_percap = max_gc(percap_deriv),
+            max_percap_time = Time[which_max_gc(percap_deriv)],
+            max_percap_dens = Measurements[which_max_gc(percap_deriv)],
+            min_dens = min_gc(Measurements))
+```
+
+### Import growth curve data
+
+The four experiments are stored as separate OD time-course and plate-design files. The helper below reads and processes one plate at a time.
+
+```{r}
+well_levels <- paste0(rep(LETTERS[1:8], each = 12), 1:12)
+threshold_empty <- 0.12 # this is the threshold we use to identify empty wells,
+                        # based on the distribution of max OD values across wells
+# this is the column we use as blank wells for background subtraction,
+# since it is in between the two sets of samples. We can change this if needed.
+
+my_read_plate <- function(dat_file, sample_file, blank_wells) {
+  # read_wides() adds "file"; retain only identifiers and standard wells
+  dat_wide <- read_wides(files = dat_file)
+  required_cols <- c("file", "Time", well_levels)
+  extra_cols <- setdiff(names(dat_wide), required_cols)
+  missing_wells <- setdiff(well_levels, names(dat_wide))
+
+  if (length(extra_cols) > 0) {
+    message("Ignoring non-well columns in ", basename(dat_file), ": ",
+            paste(extra_cols, collapse = ", "))
+  }
+  if (length(missing_wells) > 0) {
+    stop("Plate file is missing wells: ",
+         paste(missing_wells, collapse = ", "))
+  }
+
+  dat_wide <- dat_wide |>
+    select(all_of(required_cols)) |>
+    mutate(Time = time_length(hms(Time), unit = "hour"))
+
+  dat_tidy <- trans_wide_to_tidy(
+    wides = dat_wide,
+    id_cols = c("file", "Time")
+  ) |>
+    mutate(Well = factor(Well, levels = well_levels))
+
+  sample_info <- read_csv(sample_file, show_col_types = FALSE)
+
+  empty_wells <- dat_tidy |>
+    group_by(Well) |>
+    summarize(Max = max(Measurements, na.rm = TRUE), .groups = "drop") |>
+    filter(Max < threshold_empty) |>
+    pull(Well)
+
+  if (missing(blank_wells)) {
+    blank_wells <- empty_wells
+  }
+
+  # Calculate a time-matched blank from the designated blank wells.
+  blank_curve <- dat_tidy |>
+    filter(Well %in% blank_wells) |>
+    group_by(file, Time) |>
+    summarize(
+      blank_value = mean(Measurements, na.rm = TRUE),
+      .groups = "drop"
+    )
+
+  # Retain raw OD for diagnostics and use Measurements for corrected OD.
+  dat_processed <- dat_tidy |>
+    left_join(blank_curve, by = c("file", "Time")) |>
+    rename(OD_raw = Measurements) |>
+    mutate(Measurements = OD_raw - blank_value) |>
+    filter(!Well %in% empty_wells)
+
+  list(
+    d_input = dat_tidy,
+    d_processed = dat_processed,
+    blank_wells = blank_wells,
+    blank_curve = blank_curve,
+    empty_wells = empty_wells,
+    sample_info = sample_info
+  )
+}
+```
+
+To read all four plates reproducibly, first make a manifest with one row per experiment. `Date` identifies the experimental run and, together with `Well`, distinguishes wells with the same name on different plates.
+
+```{r}
+blank_wells <- paste0(LETTERS[1:8], '6') 
+plate_manifest <- tribble(
+  ~Date,                 ~dat_file,                                               ~sample_file,
+  as.Date("2026-01-03"), "../input/20260103-hi_noPi-midlog-growthcurve.csv",       "../input/20260103-plate-layout.csv",
+  as.Date("2026-01-19"), "../input/20260119-hi_noPi-stationary-phase-growthcurve.csv",
+                         "../input/20260119-plate-layout.csv",
+  as.Date("2026-01-20"), "../input/20260120-noPi-stationsary_L-midlog_R-growthcurve.csv",
+                         "../input/20260120-plate-layout.csv",
+  as.Date("2026-01-22"), "../input/20260122-noPi-midlog-growthcurve.csv",           "../input/20260122-plate-design.csv"
+)
+
+plates <- plate_manifest |>
+  mutate(
+    result = map2(
+      dat_file,
+      sample_file,
+      \(dat_file, sample_file) {
+        my_read_plate(
+          dat_file = dat_file,
+          sample_file = sample_file,
+          blank_wells = blank_wells
+        )
+      }
+    )
+  )
+```
+
+Each element of `plates$result` is the list returned by `my_read_plate()`. The next two chunks extract the same component from every result, add its experimental date, and row-bind the tibbles. The design files have slightly different columns: `list_rbind()` retains their union and fills unavailable values with `NA`.
+
+```{r}
+# One background-subtracted OD time-course tibble
+od_data <- map2(
+  plates$result,
+  plates$Date,
+  \(result, date) {
+    result$d_processed |>
+      mutate(Date = date, .before = 1)
+  }
+) |>
+  list_rbind()
+```
+
+```{r}
+# One plate-design tibble
+design_info <- map2(
+  plates$result,
+  plates$Date,
+  \(result, date) {
+    result$sample_info |>
+      mutate(Date = date, .before = 1)
+  }
+) |>
+  list_rbind()
+```
+
+## Select and validate the analysis data
+
+Only wells marked `Use == TRUE` in the plate design are included. `Elapsed`
+starts each plate at zero so fitted timing parameters have a common origin.
+`Date` and `Well` together identify an individual growth curve.
+
+```{r}
+species_levels <- c(
+  "S. cerevisiae", "C. glabrata", "K. lactis", "C. albicans"
+)
+species_colors <- c(
+  "S. cerevisiae" = "#0072B2",
+  "C. glabrata" = "#E11615",
+  "K. lactis" = "#F1C233",
+  "C. albicans" = "#009E73"
+)
+species_fill_colors <- c(
+  "S. cerevisiae" = "#80B8D8",
+  "C. glabrata"   = "#E88A89",
+  "K. lactis"     = "#F4D991",
+  "C. albicans"   = "#80CEB9"
+)
+treatment_labels <- c(
+  hiPi = "Pi-replete",
+  noPi = "No Pi"
+)
+
+analysis_data <- od_data |>
+  inner_join(
+    design_info |> filter(Use %in% TRUE),
+    by = c("Date", "Well")
+  ) |>
+  mutate(
+    Genotype = factor(Genotype, levels = species_levels),
+    Treatment = factor(Treatment, levels = c("hiPi", "noPi")),
+    Inoculate = factor(Inoculate, levels = c("midlog", "stationary"))
+  ) |>
+  group_by(Date, Well) |>
+  arrange(Time, .by_group = TRUE) |>
+  mutate(Elapsed = Time - min(Time)) |>
+  ungroup()
+```
+
+The selected design is expected to contain four replicate wells for every
+species in each inoculum-by-treatment combination. The checks below also flag
+missing curves, unexpected numbers of time points, or non-positive corrected
+OD values. Non-positive values are important because a log-scale derivative is
+undefined at those points; no arbitrary pseudocount is added.
+
+```{r}
+selection_balance <- analysis_data |>
+  distinct(Date, Well, Genotype, Treatment, Inoculate) |>
+  count(Inoculate, Treatment, Genotype, name = "n_wells")
+
+curve_checks <- analysis_data |>
+  group_by(Date, Well, Genotype, Treatment, Inoculate) |>
+  summarize(
+    n_timepoints = n(),
+    min_corrected_OD = min(Measurements, na.rm = TRUE),
+    n_nonpositive = sum(Measurements <= 0, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+missing_selected_wells <- design_info |>
+  filter(Use %in% TRUE) |>
+  anti_join(
+    od_data |> distinct(Date, Well),
+    by = c("Date", "Well")
+  )
+
+selection_balance
+curve_checks |> filter(n_timepoints != 109 | n_nonpositive > 0)
+missing_selected_wells
+
+stopifnot(
+  nrow(curve_checks) == 64,
+  all(selection_balance$n_wells == 4),
+  nrow(missing_selected_wells) == 0
+)
+```
+
+## Growth-curve visualization
+
+Mid-log and stationary inocula are plotted separately. Thin transparent lines
+show individual wells, while thick lines show the species mean at each time
+point. Treatment is faceted so the species differences under high and no
+phosphate can be compared directly.
+
+```{r}
+growth_means <- analysis_data |>
+  group_by(Inoculate, Treatment, Genotype, Elapsed) |>
+  summarize(
+    mean_OD = mean(Measurements, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+```{r growth-curves-midlog}
+growth_midlog <- plot_growth_curves("midlog")
+growth_midlog
+```
+
+```{r growth-curves-stationary}
+growth_stationary <- plot_growth_curves("stationary")
+growth_stationary
+```
+
+The reusable plotting and display-summary functions are sourced from
+`../script/20260727-growth-curve-helper-functions.R`. Data-shaping operations
+and the calculations used to obtain growth statistics remain visible below.
+
+## Primary analysis with `growthcurver`
+
+`growthcurver` fits a logistic model to the complete trajectory of each well.
+It receives the same time-matched, background-corrected OD used elsewhere, so
+`bg_correct = "none"` prevents double subtraction. Because the data are already
+in long format, `SummarizeGrowth()` is applied directly to each well. The
+function internally converts a failed logistic fit to zero-valued estimates
+with the note `"cannot fit data"`.
+
+```{r}
+summarize_growth_curve <- function(data) {
+  fit <- SummarizeGrowth(
+    data_t = data$Elapsed,
+    data_n = data$Measurements,
+    bg_correct = "none"
+  )
+
+  as_tibble(unclass(fit$vals))
+}
+
+growthcurver_stats <- analysis_data |>
+  group_by(Date, Well, Genotype, Treatment, Inoculate) |>
+  group_modify(\(.x, .y) summarize_growth_curve(.x)) |>
+  ungroup() |>
+  rename(
+    gc_k = k,
+    gc_n0 = n0,
+    gc_r = r,
+    gc_t_mid = t_mid,
+    gc_t_gen = t_gen,
+    gc_auc_e = auc_e,
+    gc_auc_l = auc_l,
+    gc_sigma = sigma,
+    fit_note = note
+  ) |>
+  mutate(
+    fit_ok = fit_note != "cannot fit data",
+    fit_note = na_if(fit_note, "")
+  )
+```
+
+The logistic growth-rate parameter `r` is the primary growth-rate estimate.
+Its corresponding doubling time is calculated as `log(2) / r`.
+
+```{r}
+growthcurver_fit_summary <- growthcurver_stats |>
+  count(Inoculate, Treatment, fit_ok)
+
+growthcurver_fit_issues <- growthcurver_stats |>
+  filter(!fit_ok | !is.na(fit_note)) |>
+  select(
+    Date, Well, Genotype, Treatment, Inoculate,
+    fit_ok, gc_sigma, fit_note
+  )
+
+growthcurver_fit_summary
+growthcurver_fit_issues
+```
+
+### Inspect the logistic fits
+
+Solid lines are observed curves and dashed lines are logistic fits.
+
+```{r}
+growthcurver_fitted <- analysis_data |>
+  left_join(
+    growthcurver_stats,
+    by = c("Date", "Well", "Genotype", "Treatment", "Inoculate")
+  ) |>
+  mutate(
+    fitted_OD = NAtT(k = gc_k, n0 = gc_n0, r = gc_r, t = Elapsed)
+  )
+```
+
+```{r growthcurver-fits-midlog, fig.width=11, fig.height=6}
+growthcurver_fits_midlog <- plot_growthcurver_fits("midlog")
+growthcurver_fits_midlog
+```
+
+```{r growthcurver-fits-stationary, fig.width=11, fig.height=6}
+growthcurver_fits_stationary <- plot_growthcurver_fits("stationary")
+growthcurver_fits_stationary
+```
+
+### Compare `growthcurver` summarary stats between species
+
+We are primarily interested in comparing the growth-rate parameter `r` and its corresponding doubling time, as well as AUC and carrying capacity `k`.
+```{r}
+growthcurver_stats_long <- growthcurver_stats |>
+  pivot_longer(
+    cols = c(gc_r, gc_t_gen, gc_k, gc_auc_e, gc_auc_l, gc_t_mid),
+    names_to = "Metric",
+    values_to = "Value"
+  ) |>
+  mutate(
+    Metric = factor(
+      Metric,
+      levels = c(
+        "gc_r", "gc_t_gen", "gc_k",
+        "gc_auc_e", "gc_auc_l", "gc_t_mid"
+      ),
+      labels = c(
+        "Growth Rate (r)",
+        "Doubling Time",
+        "Carrying Capacity (k)",
+        "Empirical AUC",
+        "Model AUC",
+        "Time to 1/2 k"
+      )
+    )
+  )
+```
+
+Modify the plotting scheme
+```{r}
+plot_metric_summary <- function(data, inoculum, title) {
+  ggplot(
+    dplyr::filter(data, Inoculate == inoculum),
+    aes(x = Treatment, y = Value, group = Genotype)
+  ) +
+    geom_bar(
+      aes(fill = Genotype),
+      stat = "summary", fun = mean, position = position_dodge(0.7),
+      width = 0.6
+    ) +
+    geom_point(
+      #aes(shape = Treatment),
+      color = "gray30", size = 1.5, shape = 3,
+      position = position_jitterdodge(
+        jitter.width = 0.10, dodge.width = 0.7
+      ),
+    ) +
+    facet_wrap(
+      ~ Metric, scales = "free_y",
+    ) +
+    scale_fill_manual(
+      #values = c("hiPi" = "gray50", "noPi" = "salmon"),
+      values = species_fill_colors, drop = FALSE
+    ) +
+    scale_x_discrete(labels = treatment_labels) +
+    labs(
+      title = paste(title, "-", inoculum, "inoculum"),
+      x = NULL, y = NULL, fill = "Species"
+    ) +
+    theme_half_open(12) +
+    theme(
+      legend.text = element_text(face = 3),
+      legend.position = "bottom",
+      # let the legend span two rows
+      legend.box = "vertical"
+    )
+}
+```
+
+```{r growthcurver-metrics-midlog}
+growthcurver_metrics_midlog <- plot_metric_summary(
+  growthcurver_stats_long, "midlog", "Primary growthcurver estimates"
+)
+growthcurver_metrics_midlog
+```
+
+```{r growthcurver-metrics-stationary}
+growthcurver_metrics_stationary <- plot_metric_summary(
+  growthcurver_stats_long, "stationary", "Primary growthcurver estimates"
+)
+growthcurver_metrics_stationary
+```
+
+### Quantify the response to Pi limitation
+
+To compare species with different baseline growth characteristics, each
+Pi-limited well is expressed relative to the mean of the four Pi-replete wells
+for the same species and inoculum state. A value of zero indicates no change
+from the Pi-replete mean; negative and positive values indicate decreases and
+increases, respectively. The individual points retain the variation among the
+four Pi-limited replicate wells.
+
+Growth rate and doubling time are both shown because they have complementary
+interpretations, although they are mathematically related. A lower growth rate
+corresponds to a longer doubling time, so their percentage changes are not
+expected to have equal magnitudes.
+
+```{r}
+growthcurver_replete_means <- growthcurver_stats |>
+  filter(Treatment == "hiPi") |>
+  group_by(Inoculate, Genotype) |>
+  summarize(
+    across(
+      c(gc_r, gc_t_gen, gc_k, gc_auc_e, gc_t_mid),
+      \(x) mean(x, na.rm = TRUE),
+      .names = "{.col}_replete"
+    ),
+    .groups = "drop"
+  )
+
+growthcurver_pi_response <- growthcurver_stats |>
+  filter(Treatment == "noPi") |>
+  left_join(
+    growthcurver_replete_means,
+    by = c("Inoculate", "Genotype")
+  ) |>
+  mutate(
+    growth_rate = 100 * (gc_r / gc_r_replete - 1),
+    doubling_time = 100 * (gc_t_gen / gc_t_gen_replete - 1),
+    carrying_capacity = 100 * (gc_k / gc_k_replete - 1),
+    empirical_auc = 100 * (gc_auc_e / gc_auc_e_replete - 1),
+    time_to_half_k = 100 * (gc_t_mid / gc_t_mid_replete - 1)
+  )
+
+growthcurver_pi_response_long <- growthcurver_pi_response |>
+  pivot_longer(
+    cols = c(
+      growth_rate, doubling_time, carrying_capacity,
+      empirical_auc, time_to_half_k
+    ),
+    names_to = "Metric",
+    values_to = "Percent_change"
+  ) |>
+  mutate(
+    Metric = factor(
+      Metric,
+      levels = c(
+        "growth_rate", "doubling_time", "carrying_capacity",
+        "empirical_auc", "time_to_half_k"
+      ),
+      labels = c(
+        "Growth rate (r)", "Doubling time", "Carrying capacity (k)",
+        "Empirical AUC", "Time to half k"
+      )
+    )
+  )
+
+growthcurver_pi_response_summary <- growthcurver_pi_response_long |>
+  group_by(Inoculate, Genotype, Metric) |>
+  summarize(
+    Mean_percent_change = mean(Percent_change, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  pivot_wider(
+    names_from = Metric,
+    values_from = Mean_percent_change
+  )
+
+growthcurver_pi_response_summary
+```
+
+```{r}
+plot_pi_response <- function(data, inoculum) {
+  ggplot(
+    filter(data, Inoculate == inoculum),
+    aes(x = Genotype, y = Percent_change, fill = Genotype)
+  ) +
+    geom_hline(yintercept = 0, color = "grey45", linewidth = 0.4) +
+    stat_summary(
+      fun = mean, geom = "col", width = 0.65,
+      color = "grey35", linewidth = 0.25
+    ) +
+    geom_jitter(
+      width = 0.08, height = 0, shape = 21,
+      color = "grey25", size = 1.8
+    ) +
+    facet_wrap(~Metric, ncol = 2) +
+    scale_fill_manual(values = species_fill_colors, drop = FALSE) +
+    scale_y_continuous(labels = \(x) paste0(x, "%")) +
+    labs(
+      title = paste(
+        "Response to Pi limitation -", inoculum, "inoculum"
+      ),
+      subtitle = "Relative to the Pi-replete mean for each species",
+      x = NULL,
+      y = "Change from Pi-replete mean",
+      fill = "Species"
+    ) +
+    theme(
+      axis.text.x = element_text(angle = 35, hjust = 1, face = 3),
+      legend.position = "none"
+    )
+}
+```
+
+```{r growthcurver-response-midlog, fig.width=10, fig.height=8}
+plot_pi_response(growthcurver_pi_response_long, "midlog")
+```
+
+```{r growthcurver-response-stationary, fig.width=10, fig.height=8}
+plot_pi_response(growthcurver_pi_response_long, "stationary")
+```
+
+The normalized `gc_t_mid` value above asks whether Pi limitation shifts the
+inflection time relative to that species' Pi-replete trajectory. The absolute
+Pi-limited values are also useful because they directly compare when the four
+species reach half of their fitted carrying capacities under the limiting
+condition.
+
+```{r}
+plot_noPi_t_mid <- function(data, inoculum) {
+  ggplot(
+    filter(data, Treatment == "noPi", Inoculate == inoculum),
+    aes(x = Genotype, y = gc_t_mid, fill = Genotype)
+  ) +
+    stat_summary(
+      fun = mean, geom = "col", width = 0.65,
+      color = "grey35", linewidth = 0.25
+    ) +
+    geom_jitter(
+      width = 0.08, height = 0, shape = 21,
+      color = "grey25", size = 1.8
+    ) +
+    scale_fill_manual(values = species_fill_colors, drop = FALSE) +
+    labs(
+      title = paste(
+        "Time to half carrying capacity under Pi limitation -",
+        inoculum, "inoculum"
+      ),
+      x = NULL,
+      y = "Time to half k (hours)",
+      fill = "Species"
+    ) +
+    theme(
+      axis.text.x = element_text(angle = 35, hjust = 1, face = 3),
+      legend.position = "none"
+    )
+}
+```
+
+```{r growthcurver-t-mid-midlog, fig.width=7, fig.height=5}
+plot_noPi_t_mid(growthcurver_stats, "midlog")
+```
+
+```{r growthcurver-t-mid-stationary, fig.width=7, fig.height=5}
+plot_noPi_t_mid(growthcurver_stats, "stationary")
+```
+
+#### Interpretation
+
+The carrying-capacity and AUC results support two broad response classes
+across both inoculum states. Under Pi limitation, *S. cerevisiae* and
+*C. albicans* retain approximately 50--60% of their Pi-replete carrying
+capacity and 47--67% of their Pi-replete AUC. In contrast, *C. glabrata* and
+*K. lactis* retain only approximately 12--30% of carrying capacity and 15--33%
+of AUC. Thus, the former pair continues accumulating substantially more
+biomass after the latter pair has reached a lower plateau.
+
+The fitted growth rates provide more qualified support for this model.
+*S. cerevisiae* shows the strongest consistent slowing, with `r` decreasing
+by approximately 41--44%, while *C. glabrata* decreases by approximately 33%.
+*K. lactis* changes little with mid-log inoculum and has a higher fitted `r`
+with stationary inoculum. *C. albicans* decreases by approximately 30% with
+mid-log inoculum but also has a higher fitted `r` with stationary inoculum.
+Consequently, the claim that *C. albicans* generally slows its maximum growth
+rate is not supported across both inoculum states, even though its
+carrying-capacity and AUC responses consistently resemble those of
+*S. cerevisiae*.
+
+Under Pi limitation, the absolute `gc_t_mid` values are later for
+*S. cerevisiae* and *C. albicans* (approximately 4.1--5.5 hours) than for
+*C. glabrata* and *K. lactis* (approximately 1.6--3.2 hours). This is
+consistent with the former pair reaching its higher final density over a
+longer portion of the experiment. Normalization adds an important caveat:
+`gc_t_mid` does not generally increase relative to the corresponding
+Pi-replete trajectory; stationary-inoculum *S. cerevisiae* is the only clear
+exception.
+
+Finally, `gc_t_mid` is the time at the logistic inflection point, when the
+model reaches half of `k` and its absolute slope is maximal. It is not the
+amount of time spent at the maximum growth rate, because the mathematical
+maximum occurs at a single instant. Estimating a duration would require a
+separate definition, such as the interval during which the modeled derivative
+remains above 90% of its maximum. The proposed transcriptome remodeling and
+alternative-metabolism explanation therefore remains a mechanistic hypothesis
+that is consistent with parts of the growth phenotype but is not directly
+tested by these data.
+
+## Secondary analysis with `gcplyr`
+
+Lag time is not estimated because the curves do not show a clearly observed
+lag phase. Background has already been subtracted, so `blank = 0` prevents
+double subtraction. The main `gcplyr` rate uses a 13-point regression window,
+approximately two hours at the observed sampling interval.
+
+### Thirteen-point derivative procedure
+
+```{r}
+gcplyr_deriv_13 <- analysis_data |>
+  group_by(Date, Well) |>
+  arrange(Elapsed, .by_group = TRUE) |>
+  mutate(
+    percap_rate_13 = calc_deriv(
+      x = Elapsed,
+      y = Measurements,
+      percapita = TRUE,
+      blank = 0,
+      window_width_n = 13,
+      trans_y = "log"
+    )
+  ) |>
+  ungroup()
+
+gcplyr_stats <- gcplyr_deriv_13 |>
+  group_by(Date, Well, Genotype, Treatment, Inoculate) |>
+  summarize(
+    first_valid_rate_time = min(Elapsed[!is.na(percap_rate_13)]),
+    max_growth_rate = max_gc(percap_rate_13),
+    max_growth_time = Elapsed[which_max_gc(percap_rate_13)],
+    doubling_time = gcplyr::doubling_time(y = max_growth_rate),
+    max_at_boundary =
+      abs(max_growth_time - first_valid_rate_time) < 1e-8,
+    max_OD = max_gc(Measurements),
+    auc = auc(
+      x = Elapsed,
+      y = Measurements,
+      blank = 0,
+      warn_negative_y = FALSE
+    ),
+    .groups = "drop"
+  )
+
+gcplyr_boundary_flags <- gcplyr_stats |>
+  filter(max_at_boundary | is.na(max_growth_rate))
+
+gcplyr_boundary_flags
+```
+
+Boundary maxima are retained for transparency but should be interpreted as
+left-boundary estimates rather than well-resolved interior maxima.
+
+### Diagnose the 13-point rate
+
+```{r}
+max_rate_diag_13 <- plot_gcplyr_max_growth_diagnostic(
+  df = analysis_data,
+  date = "2026-01-19",
+  wells = c("B2", "C2", "D2", "E2"),
+  window_width_n = 13
+)
+
+max_rate_diag_13
+attr(max_rate_diag_13, "max_growth_summary")
+```
+
+```{r}
+gcplyr_stats_long <- gcplyr_stats |>
+  pivot_longer(
+    cols = c(max_growth_rate, doubling_time, max_OD, auc),
+    names_to = "Metric",
+    values_to = "Value"
+  ) |>
+  mutate(
+    Metric = factor(
+      Metric,
+      levels = c("max_growth_rate", "doubling_time", "max_OD", "auc"),
+      labels = c(
+        "Maximum observed growth rate",
+        "Doubling time",
+        "Maximum OD",
+        "AUC"
+      )
+    )
+  )
+```
+
+```{r gcplyr-metrics-midlog, fig.width=10, fig.height=10}
+gcplyr_metrics_midlog <- plot_metric_summary(
+  gcplyr_stats_long, "midlog", "Secondary gcplyr estimates (13-point)"
+)
+gcplyr_metrics_midlog
+```
+
+```{r gcplyr-metrics-stationary, fig.width=10, fig.height=10}
+gcplyr_metrics_stationary <- plot_metric_summary(
+  gcplyr_stats_long, "stationary", "Secondary gcplyr estimates (13-point)"
+)
+gcplyr_metrics_stationary
+```
+
+### Sensitivity analysis: drop two + LOESS 0.10 + 9-point derivative
+
+The first two observations are removed within each curve before smoothing.
+Elapsed time is left on its original scale. Degree-1 LOESS with `span = 0.10`
+is followed by a 9-point per-capita derivative.
+
+```{r}
+gcplyr_loess_data <- analysis_data |>
+  group_by(Date, Well, Genotype, Treatment, Inoculate) |>
+  arrange(Elapsed, .by_group = TRUE) |>
+  filter(row_number() > 2) |>
+  mutate(
+    OD_loess = smooth_data(
+      x = Elapsed,
+      y = Measurements,
+      sm_method = "loess",
+      span = 0.10,
+      degree = 1,
+      control = loess.control(surface = "direct")
+    ),
+    percap_rate_loess = calc_deriv(
+      x = Elapsed,
+      y = OD_loess,
+      percapita = TRUE,
+      blank = 0,
+      window_width_n = 9,
+      trans_y = "log"
+    )
+  ) |>
+  ungroup()
+
+gcplyr_loess_stats <- gcplyr_loess_data |>
+  group_by(Date, Well, Genotype, Treatment, Inoculate) |>
+  summarize(
+    first_valid_rate_time = min(Elapsed[!is.na(percap_rate_loess)]),
+    max_growth_rate = max_gc(percap_rate_loess),
+    max_growth_time = Elapsed[which_max_gc(percap_rate_loess)],
+    doubling_time = gcplyr::doubling_time(y = max_growth_rate),
+    max_at_boundary =
+      abs(max_growth_time - first_valid_rate_time) < 1e-8,
+    .groups = "drop"
+  )
+```
+
+The sensitivity table and plots compare both model-free rate procedures.
+
+```{r}
+gcplyr_sensitivity <- gcplyr_stats |>
+  select(
+    Date, Well, Genotype, Treatment, Inoculate,
+    rate_13 = max_growth_rate,
+    doubling_13 = doubling_time,
+    boundary_13 = max_at_boundary
+  ) |>
+  left_join(
+    gcplyr_loess_stats |>
+      select(
+        Date, Well,
+        rate_loess = max_growth_rate,
+        doubling_loess = doubling_time,
+        boundary_loess = max_at_boundary
+      ),
+    by = c("Date", "Well")
+  )
+
+gcplyr_sensitivity_summary <- gcplyr_sensitivity |>
+  summarize(
+    rate_correlation = cor(rate_13, rate_loess, use = "complete.obs"),
+    median_absolute_rate_difference =
+      median(abs(rate_13 - rate_loess), na.rm = TRUE),
+    boundary_estimates_13 = sum(boundary_13, na.rm = TRUE),
+    boundary_estimates_loess = sum(boundary_loess, na.rm = TRUE)
+  )
+
+gcplyr_sensitivity_summary
+```
+
+```{r gcplyr-sensitivity-midlog, fig.width=7, fig.height=5}
+plot_gcplyr_sensitivity("midlog")
+```
+
+```{r gcplyr-sensitivity-stationary, fig.width=7, fig.height=5}
+plot_gcplyr_sensitivity("stationary")
+```
+
+## Compare primary and secondary estimates
+
+The packages estimate related but non-identical quantities. `growthcurver`
+estimates logistic `r` and carrying capacity, whereas `gcplyr` uses the
+largest observed 13-point per-capita slope and maximum observed OD.
+
+```{r}
+method_comparison <- gcplyr_stats |>
+  left_join(
+    growthcurver_stats,
+    by = c("Date", "Well", "Genotype", "Treatment", "Inoculate")
+  )
+
+method_comparison_long <- bind_rows(
+  method_comparison |>
+    transmute(
+      Date, Well, Genotype, Treatment, Inoculate,
+      Metric = "Growth rate",
+      gcplyr = max_growth_rate,
+      growthcurver = gc_r
+    ),
+  method_comparison |>
+    transmute(
+      Date, Well, Genotype, Treatment, Inoculate,
+      Metric = "Doubling time",
+      gcplyr = doubling_time,
+      growthcurver = gc_t_gen
+    ),
+  method_comparison |>
+    transmute(
+      Date, Well, Genotype, Treatment, Inoculate,
+      Metric = "Maximum OD / carrying capacity",
+      gcplyr = max_OD,
+      growthcurver = gc_k
+    ),
+  method_comparison |>
+    transmute(
+      Date, Well, Genotype, Treatment, Inoculate,
+      Metric = "Empirical AUC",
+      gcplyr = auc,
+      growthcurver = gc_auc_e
+    )
+) |>
+  mutate(
+    Metric = factor(
+      Metric,
+      levels = c(
+        "Growth rate",
+        "Doubling time",
+        "Maximum OD / carrying capacity",
+        "Empirical AUC"
+      )
+    )
+  )
+
+auc_agreement <- method_comparison |>
+  summarize(
+    max_absolute_difference = max(abs(auc - gc_auc_e), na.rm = TRUE),
+    mean_absolute_difference = mean(abs(auc - gc_auc_e), na.rm = TRUE)
+  )
+
+auc_agreement
+```
+
+```{r method-comparison-midlog, fig.width=14, fig.height=4.5}
+method_comparison_midlog <- plot_method_comparison("midlog")
+method_comparison_midlog
+```
+
+```{r method-comparison-stationary, fig.width=14, fig.height=4.5}
+method_comparison_stationary <- plot_method_comparison("stationary")
+method_comparison_stationary
+```
+
+<!--
+
+## Archived smoothing and exploratory analysis
+
+The following material is retained from earlier analyses for reference. It is
+not executed when the notebook is rendered. This includes the moving-average,
+alternative derivative-window, and loess smoothing experiments.
+
+```
+knitr::opts_chunk$set(eval = FALSE)
+```
+
+Plot plain derivative
+
+```         
+ggplot(plain_deriv, aes(x = Time, y = Deriv)) +
+  geom_line() +
+  facet_wrap(~Well, nrow = 8, ncol = 7) +
+  theme_minimal_grid(font_size = 10)
+```
+
+> We can see that the derivative plots are very noisy in the first 5-6 hours for some of the samples. This could affect the lag time calculation.
+
+Per capita derivative
+
+```         
+ggplot(per_cap_deriv, aes(x = Time, y = percap_deriv)) +
+  geom_line() +
+  facet_wrap(~Well, nrow = 8, ncol = 7, scales = "free_y") +
+  theme_minimal_grid(font_size = 10) +
+  theme(axis.text.y = element_blank())
+```
+
+### Lag time and other summary stats calculation
+
+```
+dat_sum <- dat_deriv %>%
+  group_by(Date, Well) %>%
+  summarize(
+    min_dens = min_gc(Measurements, na.rm = TRUE),
+    max_dens = max_gc(Measurements, na.rm = TRUE),
+    time_to_5pc_max = first_above(x = Time, y = Measurements, 
+                                  threshold = max_dens*0.05, return = "x"),
+    lag_time = lag_time(x = Time, y = Measurements,
+                        deriv = percap_deriv, blank = 0),
+    max_percap = max_gc(percap_deriv),
+    max_percap_time = Time[which_max_gc(percap_deriv)],
+    max_percap_dens = Measurements[which_max_gc(percap_deriv)],
+    min_dens = min_gc(Measurements)
+  ) %>%
+  full_join(design_info, by = c("Date", "Well")) %>%
+  select(Date, Well, Genotype, Treatment, Inoculate, everything())
+```
+
+### Diagnostic plot
+
+Build a diagnostic plot function
+
+```
+my_diag_plot <- function(df, df.sum, well){
+  # df is the data frame containing the data
+  # df.sum contains the per well estimates calculated from the raw data
+  # this function is aimed at one well of data, specified by "well"
+  # check to see if the well number is valid
+  if(!well %in% df$Well){
+    stop(paste(well, "is not a valid well", sep = " "))
+  }
+  
+  # subset the df
+  dat <- filter(df, Well == well)
+  # extract the estimates
+  par <- filter(df.sum, Well == well)
+  
+  # for overlaying the derivatives on the plot,
+  # we will calculate a scaling factor
+  tmp <- dat %>% summarize(
+    min_OD = min_gc(Measurements), max_OD = max_gc(Measurements),
+    min_deriv = min_gc(deriv), max_deriv = max_gc(deriv),
+    rng_OD = max_OD - min_OD,
+    rng_deriv = max_deriv - min_deriv,
+    sf_deriv = rng_OD / rng_deriv,
+    min_logOD = min_gc(log(Measurements)), max_logOD = max_gc(log(Measurements)),
+    min_percap_deriv = min_gc(percap_deriv), max_percap_deriv = max_gc(percap_deriv),
+    rng_logOD = max_logOD - min_logOD,
+    rng_percap_deriv = max_percap_deriv - min_percap_deriv,
+    sf_percap_deriv = rng_logOD / rng_percap_deriv
+  )
+  
+  # make the linear growth curve plot
+  p1 <- dat %>% 
+    mutate(
+      scaled_deriv = (deriv - tmp$min_deriv)*tmp$sf_deriv + tmp$min_OD
+    ) %>% 
+    ggplot(aes(x = Time, y = Measurements)) + geom_point(size = 0.4) + 
+    geom_line() +
+    geom_line(aes(x = Time, y = scaled_deriv), color = "blue", linetype = 2) +
+    ylab("OD")
+    
+  # make the semi-log plot
+  p2 <- dat %>% 
+    mutate(
+      scaled_percap_deriv = (percap_deriv-tmp$min_percap_deriv)*tmp$sf_percap_deriv + 
+        tmp$min_logOD
+    ) %>% 
+    ggplot(aes(x = Time, y = log(Measurements))) + geom_point() + geom_line() +
+    geom_line(aes(x = Time, y = scaled_percap_deriv),
+              color = "blue", linetype = 2) +
+    geom_abline(
+      data = par,
+      color = "red", 
+      aes(slope = max_percap,
+          intercept = log(max_percap_dens) - max_percap * max_percap_time)
+    ) +
+    geom_vline(data = par,
+               aes(xintercept = lag_time), lty = 2) +
+    geom_hline(data = par,
+               aes(yintercept = log(min_dens))) +
+    ylab("log OD")
+  # draw the derivative and per_capita_derivative
+
+  plot_grid(p1, p2, nrow = 2)
+}
+```
+
+```
+problem_wells <- c("C10", "D7", "E9", "F8")
+tmp <- filter(lag_time, Well %in% problem_wells)
+
+ggplot(data = tmp, aes(x = Time, y = log(Measurements))) +
+  geom_point() +
+  facet_wrap(~Well) +
+  geom_abline(tmp,
+              color = "red",
+              aes(slope = max_percap,
+                  intercept = log(max_percap_dens) - max_percap*max_percap_time)) +
+  geom_vline(data = tmp,
+             aes(xintercept = lag_time), lty = 2) +
+  geom_hline(data = tmp,
+             aes(yintercept = log(min_dens)))
+```
+
+#Here I plot lag times of raw data
+
+```
+PPKOdata_sum <- summarize(
+  group_by(PPKOdata_merged, Well),
+  lag_time = lag_time(x = Time, y = Measurements, deriv = percap_deriv,
+                      blank = 0),
+  max_percap = max(percap_deriv, na.rm = TRUE),
+  max_dens = max(Measurements),
+  auc = auc(y = Measurements, x = as.numeric(Time)))
+```
+
+```
+PPKOdata_sum$Well <- factor(PPKOdata_sum$Well, 
+                        levels = paste0(rep(LETTERS[1:8], each = 12), 1:12))
+
+#Plot lag time
+ggplot(data = PPKOdata_sum) +
+  geom_text(aes(label = round(lag_time, 2), x = 1, y = 1)) +
+  facet_wrap(~ Well, ncol = 12) +
+  labs(title = "Lag time by well") +
+  theme(axis.title = element_blank(), 
+        axis.text = element_blank(),
+        axis.ticks = element_blank())
+```
+
+# Here I am trying to use "smooth" to adjust try to remove noise
+
+```
+PPKOdata_merged <- 
+  PPKOdata_merged %>%
+  group_by(Well) %>%
+  mutate(
+    meas_smooth = smooth_data(
+      x = Time,
+      y = Measurements,
+      sm_method = "moving-average",
+      window_width_n = 5
+    )
+  ) %>%
+  ungroup()
+
+
+```
+
+```
+PPKOdata_merged <-
+  PPKOdata_merged %>%
+  group_by(Well) %>%
+  mutate(
+    percap_deriv_smooth = c(
+      NA,
+      diff(log(meas_smooth)) / diff(Time)
+    )
+  ) %>%
+  ungroup()
+
+
+```
+
+```
+PPKOdata_sum_smooth <- 
+  PPKOdata_merged %>%
+  group_by(Well) %>%
+  summarize(
+    lag_time = lag_time(
+      x = Time,
+      y = meas_smooth,
+      deriv = percap_deriv_smooth,
+      blank = 0
+    ),
+    max_percap = max(percap_deriv_smooth, na.rm = TRUE),
+    max_dens = max(meas_smooth, na.rm = TRUE),
+    auc = auc(y = meas_smooth, x = as.numeric(Time))
+  )
+
+```
+
+```
+ggplot(PPKOdata_sum_smooth) +
+  geom_text(aes(label = round(lag_time, 2), x = 1, y = 1)) +
+  facet_wrap(~ Well, ncol = 12) +
+  labs(title = "Lag time by well (smoothed data)") +
+  theme(
+    axis.title = element_blank(),
+    axis.text = element_blank(),
+    axis.ticks = element_blank()
+  )
+
+```
+
+```
+PPKOdata_merged$Well <- 
+  factor(PPKOdata_merged$Well,
+         levels = paste0(rep(LETTERS[1:8], each = 12), 1:12))
+ggplot(data = PPKOdata_merged,
+       aes(x = Time, y = meas_smooth)) +
+  geom_line() +
+  facet_wrap(~ Well, nrow = 8, ncol = 12) +
+  labs(
+    title = "Smoothed growth curves",
+    y = "Smoothed measurements"
+  )
+
+```
+
+#After I smooth the data I need to figure out what derivative value to use
+
+```
+PPKOdata_deriv_multi <-
+  PPKOdata_merged %>%
+  group_by(Well) %>%
+  mutate(
+    derivpercap_3 = calc_deriv(
+      x = Time, y = meas_smooth,
+      percapita = TRUE, blank = 0,
+      window_width_n = 3
+    ),
+    derivpercap_5 = calc_deriv(
+      x = Time, y = meas_smooth,
+      percapita = TRUE, blank = 0,
+      window_width_n = 5
+    ),
+    derivpercap_9 = calc_deriv(
+      x = Time, y = meas_smooth,
+      percapita = TRUE, blank = 0,
+      window_width_n = 9
+    )
+  ) %>%
+  ungroup()
+
+```
+
+# I want to see what the effects of the different derivaitve windows are
+
+```
+wells_of_interest <- c("D7", "D8", "H8", "H10")
+
+PPKOdata_deriv_wide <-
+  PPKOdata_deriv_multi %>%
+  filter(Well %in% wells_of_interest) %>%
+  pivot_longer(
+    cols = starts_with("derivpercap_"),
+    names_to = "window_width_n",
+    names_prefix = "derivpercap_",
+    values_to = "derivpercap"
+  )
+ggplot(
+  data = PPKOdata_deriv_wide,
+  aes(x = Time, y = derivpercap)
+) +
+  geom_line(
+    aes(color = window_width_n),
+    linewidth = 1,
+    alpha = 0.75
+  ) +
+  facet_wrap(~ Well, scales = "free_y") +
+  scale_color_grey(
+    start = 0.7,
+    end = 0.1,
+    name = "window width"
+  ) +
+  ylim(NA, 5) +
+  labs(
+    title = "Per-capita derivative at multiple smoothing levels",
+    y = "Per-capita growth rate"
+  ) +
+  theme_bw()
+
+```
+
+# I want a closer look so I look at only the first 6 hours
+
+```
+PPKOdata_deriv_6h <-
+  PPKOdata_deriv_wide %>%
+  filter(Time <= 6)
+ggplot(
+  PPKOdata_deriv_6h,
+  aes(x = Time, y = derivpercap, color = window_width_n)
+) +
+  geom_line(linewidth = 1, alpha = 0.75) +
+  facet_wrap(~ Well, scales = "free_y") +
+  scale_color_grey(
+    start = 0.7,
+    end = 0.1,
+    name = "window width"
+  ) +
+  labs(
+    title = "Per-capita growth rate (first 6 hours)",
+    y = "Per-capita derivative",
+    x = "Time (hours)"
+  ) +
+  theme_bw()
+
+```
+
+#now I try to replot growth curves and lag times using window width of 5
+
+```
+PPKOdata_final <-
+  PPKOdata_merged %>%
+  group_by(Well) %>%
+  mutate(
+    percap_deriv = calc_deriv(
+      x = Time,
+      y = meas_smooth,
+      percapita = TRUE,
+      blank = 0,
+      window_width_n = 5
+    )
+  ) %>%
+  ungroup()
+
+ggplot(data = PPKOdata_final, aes(x = Time, y = meas_smooth)) +
+  geom_line() +
+  facet_wrap(~Well, nrow = 8, ncol = 12)
+
+
+```
+
+```
+PPKOdata_sum_smooth <- summarize(
+  group_by(PPKOdata_merged, Well),
+  lag_time = lag_time(x = Time, y = meas_smooth, deriv = percap_deriv,
+                      blank = 0),
+  max_percap = max(percap_deriv, na.rm = TRUE),
+  max_dens = max(meas_smooth),
+  auc = auc(y = meas_smooth, x = as.numeric(Time)))
+
+PPKOdata_sum_smooth$Well <- factor(PPKOdata_sum_smooth$Well, 
+                        levels = paste0(rep(LETTERS[1:8], each = 12), 1:12))
+
+#Plot lag time
+ggplot(data = PPKOdata_sum_smooth) +
+  geom_text(aes(label = round(lag_time, 2), x = 1, y = 1)) +
+  facet_wrap(~ Well, ncol = 12) +
+  labs(title = "smoothed Lag time by well") +
+  theme(axis.title = element_blank(), 
+        axis.text = element_blank(),
+        axis.ticks = element_blank())
+```
+
+# Now I will try to use the loess function to smooth the data
+
+```
+PPKOdata_loess_merged <-
+  PPKOdata_merged %>%
+  group_by(Well) %>%
+  mutate(
+    meas_loess = smooth_data(
+      x = Time,
+      y = Measurements,
+      sm_method = "loess",
+      span = 0.15,
+      degree = 1
+    )
+  ) %>%
+  ungroup()
+
+PPKOdata_loess_deriv <-
+  PPKOdata_loess_merged %>%
+  group_by(Well) %>%
+  mutate(
+    percap_deriv_loess = calc_deriv(
+      x = Time,
+      y = meas_loess,
+      percapita = TRUE,
+      blank = 0,
+      window_width_n = 5
+    )
+  ) %>%
+  ungroup()
+
+
+```
+
+```
+PPKOdata_sum_loess <-
+  PPKOdata_loess_deriv %>%
+  group_by(Well) %>%
+  summarize(
+    lag_time = lag_time(
+      x = Time,
+      y = meas_loess,
+      deriv = percap_deriv_loess,
+      blank = 0
+    ),
+    max_percap = max(percap_deriv_loess, na.rm = TRUE),
+    max_dens = max(meas_loess, na.rm = TRUE),
+    auc = auc(y = meas_loess, x = as.numeric(Time))
+  )
+
+```
+
+#plot loess lag times
+
+```
+ggplot(PPKOdata_sum_loess) +
+  geom_text(aes(label = round(lag_time, 2), x = 1, y = 1)) +
+  facet_wrap(~ Well, ncol = 12) +
+  labs(title = "Lag time by well (loess data)") +
+  theme(
+    axis.title = element_blank(),
+    axis.text = element_blank(),
+    axis.ticks = element_blank()
+  )
+
+```
+
+#plot loess growthcurves
+
+```
+PPKOdata_loess_deriv$Well <- 
+  factor(PPKOdata_loess_deriv$Well,
+         levels = paste0(rep(LETTERS[1:8], each = 12), 1:12))
+
+ggplot(data = PPKOdata_loess_deriv,
+       aes(x = Time, y = meas_loess)) +
+  geom_line() +
+  facet_wrap(~ Well, nrow = 8, ncol = 12) +
+  labs(
+    title = "Loess growth curves",
+    y = "Loess measurements"
+  )
+
+```
+
+# now i will try to compare one graph using derivatives
+
+```
+PPsample_wells <- c("D7", "D8", "H8", "H10")
+```
+
+```
+wells_of_interest <- c("D7", "D8", "H8", "H10")
+
+PPKOdata_compare <-
+  PPKOdata_loess_deriv %>%
+  filter(Well %in% wells_of_interest) %>%
+  pivot_longer(
+    cols = c(Measurements, meas_loess),
+    names_to = "type",
+    values_to = "value"
+  )
+ggplot(PPKOdata_compare,
+       aes(x = Time, y = value, color = type)) +
+  geom_line(alpha = 0.75, linewidth = 1) +
+  facet_wrap(~ Well, scales = "free_y") +
+  scale_color_manual(
+    values = c(
+      Measurements = "grey60",
+      meas_loess    = "black"
+    ),
+    labels = c(
+      Measurements = "Raw data",
+      meas_loess    = "Loess-smoothed"
+    )
+  ) +
+  labs(
+    title = "Effect of loess smoothing on growth curves",
+    y = "OD / density",
+    color = ""
+  ) +
+  theme_bw()
+
+```
+
+#compare in a smaller time frame
+
+```
+PPKOdata_compare_6h <-
+  PPKOdata_compare %>%
+  filter(Time <= 6)
+ggplot(PPKOdata_compare_6h,
+       aes(x = Time, y = value, color = type)) +
+  geom_line(alpha = 0.75, linewidth = 1) +
+  facet_wrap(~ Well, scales = "free_y") +
+  labs(
+    title = "Raw vs loess (first 6 hours)",
+    y = "OD / density",
+    color = ""
+  ) +
+  theme_bw()
+
+```
+
+-->

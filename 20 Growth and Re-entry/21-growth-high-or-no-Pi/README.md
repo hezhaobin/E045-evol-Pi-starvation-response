@@ -1,0 +1,1 @@
+Analysis of growth curves for the four species under high or no phosphate conditions (same SC base media). Two different sets of data were generated, one using mid-log phase cells as the starting point and another using stationary phase cells.
